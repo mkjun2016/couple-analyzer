@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Literal
 
@@ -9,12 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+from openai import OpenAI
+
 import firebase_admin
 from firebase_admin import credentials, firestore, auth as fb_auth
 
 load_dotenv()
 
 Speaker = Literal["me", "partner"]
+
+# ---- Limit ----
+MAX_MESSAGES = 1000
+MAX_TIMELINE_POINTS = 220
+MIN_TIMELINE_POINTS = 60
+TARGET_TIMELINE_POINTS = 120
 
 
 class Message(BaseModel):
@@ -42,8 +51,8 @@ class Highlight(BaseModel):
 
 
 class MetricsPair(BaseModel):
-    me: int
-    partner: int
+    me: int = Field(ge=0, le=100)
+    partner: int = Field(ge=0, le=100)
 
 
 class Metrics(BaseModel):
@@ -51,7 +60,24 @@ class Metrics(BaseModel):
     responsiveness: MetricsPair
     warmth: MetricsPair
     repair: MetricsPair
-    balance_index: int
+    balance_index: int = Field(ge=0, le=100)
+
+
+class LikingIndex(BaseModel):
+    # 0~100, 50=비슷, >50=내가 더 좋아함, <50=상대가 더 좋아함
+    score: int = Field(ge=0, le=100)
+    winner: Literal["me", "partner", "tie"]
+    rationale_1line: str
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+
+class TimelinePoint(BaseModel):
+    message_id: str
+    i: int = Field(ge=0)
+    speaker: Speaker
+    mood: int = Field(ge=0, le=100)  # 0=차가움/부정, 100=따뜻/긍정
+    tension: int = Field(ge=0, le=100)  # 0=갈등 없음, 100=갈등/방어 매우 큼
+    repair: int = Field(ge=0, le=100)  # 0=회복 없음, 100=회복 시도 강함
 
 
 class AnalyzeResponse(BaseModel):
@@ -59,9 +85,11 @@ class AnalyzeResponse(BaseModel):
     confidence: Literal["low", "medium", "high"] = "medium"
     metrics: Optional[Metrics] = None
     highlights: List[Highlight] = []
+    liking_index: Optional[LikingIndex] = None
+    timeline_points: List[TimelinePoint] = []
 
 
-app = FastAPI(title="Couple Chat Analyzer API", version="0.2.0")
+app = FastAPI(title="Couple Chat Analyzer API", version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,27 +101,235 @@ app.add_middleware(
 
 ANALYSIS_MODE = os.getenv("ANALYSIS_MODE", "mock")  # "mock" | "openai"
 
+# ---- OpenAI init ----
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# ---- Structured Output Schema (Responses API: text.format.schema) ----
+ANALYZE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "summary_1line",
+        "confidence",
+        "metrics",
+        "highlights",
+        "liking_index",
+        "timeline_points",
+    ],
+    "properties": {
+        "summary_1line": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "metrics": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "initiative",
+                        "responsiveness",
+                        "warmth",
+                        "repair",
+                        "balance_index",
+                    ],
+                    "properties": {
+                        "initiative": {"$ref": "#/$defs/metricsPair"},
+                        "responsiveness": {"$ref": "#/$defs/metricsPair"},
+                        "warmth": {"$ref": "#/$defs/metricsPair"},
+                        "repair": {"$ref": "#/$defs/metricsPair"},
+                        "balance_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                    },
+                },
+            ]
+        },
+        "highlights": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["type", "message_id", "reason"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["green", "red"]},
+                    "message_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+        "liking_index": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["score", "winner", "rationale_1line", "confidence"],
+                    "properties": {
+                        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                        "winner": {"type": "string", "enum": ["me", "partner", "tie"]},
+                        "rationale_1line": {"type": "string"},
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"],
+                        },
+                    },
+                },
+            ]
+        },
+        "timeline_points": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["message_id", "i", "speaker", "mood", "tension", "repair"],
+                "properties": {
+                    "message_id": {"type": "string"},
+                    "i": {"type": "integer", "minimum": 0},
+                    "speaker": {"type": "string", "enum": ["me", "partner"]},
+                    "mood": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "tension": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "repair": {"type": "integer", "minimum": 0, "maximum": 100},
+                },
+            },
+        },
+    },
+    "$defs": {
+        "metricsPair": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["me", "partner"],
+            "properties": {
+                "me": {"type": "integer", "minimum": 0, "maximum": 100},
+                "partner": {"type": "integer", "minimum": 0, "maximum": 100},
+            },
+        }
+    },
+}
+
 
 # ---- Firebase Admin init ----
 FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED_PATH")
-
 db = None
 if FIREBASE_CRED_PATH:
     cred = credentials.Certificate(FIREBASE_CRED_PATH)
     firebase_admin.initialize_app(cred)
     db = firestore.client()
 else:
-    # 로컬에서 DB 없이도 mock 동작하게 두고 싶으면 그대로 두면 됨
     db = None
+
+
+def build_transcript(req: AnalyzeRequest) -> str:
+    lines = []
+    for m in req.messages:
+        who = "ME" if m.speaker == "me" else "PARTNER"
+        ts = f"[{m.ts}] " if m.ts else ""
+        lines.append(f"{ts}{who}({m.id}): {m.text.strip()}")
+    return "\n".join(lines)
+
+
+def clamp01_100(x: int) -> int:
+    return max(0, min(100, int(x)))
+
+
+def sample_indices(n: int, target: int) -> List[int]:
+    if n <= target:
+        return list(range(n))
+    # 균등 샘플링
+    step = n / target
+    idxs = [int(i * step) for i in range(target)]
+    # 마지막 인덱스가 n-1이 아닐 수 있어 보정
+    idxs[-1] = n - 1
+    # 중복 제거(간혹 발생) + 정렬
+    idxs = sorted(set(idxs))
+    return idxs
+
+
+def mock_timeline(req: AnalyzeRequest) -> List[TimelinePoint]:
+    msgs = req.messages
+    n = len(msgs)
+    target = min(
+        MAX_TIMELINE_POINTS, max(MIN_TIMELINE_POINTS, min(TARGET_TIMELINE_POINTS, n))
+    )
+    idxs = sample_indices(n, target)
+
+    points: List[TimelinePoint] = []
+    for k, idx in enumerate(idxs):
+        m = msgs[idx]
+        # 아주 단순한 패턴 기반(대충 움직이는 선)
+        base = 55 if m.speaker == "partner" else 50
+        mood = clamp01_100(base + (k % 7) * 3 - (k % 5) * 2)
+        tension = clamp01_100(35 + (k % 9) * 4 - (k % 6) * 3)
+        repair = clamp01_100(30 + (k % 8) * 3 - (k % 4) * 2)
+        points.append(
+            TimelinePoint(
+                message_id=m.id,
+                i=k,
+                speaker=m.speaker,
+                mood=mood,
+                tension=tension,
+                repair=repair,
+            )
+        )
+    return points
+
+
+def mock_liking(req: AnalyzeRequest, metrics: Optional[Metrics]) -> LikingIndex:
+    total = len(req.messages)
+    if metrics:
+        # warmth/responsiveness 기반으로 매우 간단히
+        diff = (metrics.warmth.me + metrics.responsiveness.me) - (
+            metrics.warmth.partner + metrics.responsiveness.partner
+        )
+        score = clamp01_100(50 + int(round(diff * 0.25)))
+    else:
+        score = 50
+
+    if 46 <= score <= 54:
+        winner = "tie"
+    else:
+        winner = "me" if score > 50 else "partner"
+
+    confidence = "high" if total >= 200 else "medium" if total >= 40 else "low"
+    rationale = (
+        "표현의 따뜻함/호응 패턴이 비슷해서 균형에 가까움."
+        if winner == "tie"
+        else (
+            "내가 더 자주 공감/확인/유지 신호를 보내는 패턴."
+            if winner == "me"
+            else "상대가 더 호응적이고 따뜻한 반응 비중이 큰 패턴."
+        )
+    )
+    return LikingIndex(
+        score=score, winner=winner, rationale_1line=rationale, confidence=confidence
+    )
 
 
 def mock_analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     me_count = sum(1 for m in req.messages if m.speaker == "me")
     pa_count = sum(1 for m in req.messages if m.speaker == "partner")
-    total = me_count + pa_count
+    total = max(1, me_count + pa_count)
 
-    initiative_me = int(round(100 * (me_count / total))) if total else 50
+    initiative_me = int(round(100 * (me_count / total)))
     initiative_pa = 100 - initiative_me
+
+    metrics_obj = (
+        Metrics(
+            initiative=MetricsPair(me=initiative_me, partner=initiative_pa),
+            responsiveness=MetricsPair(me=55, partner=61),
+            warmth=MetricsPair(me=58, partner=64),
+            repair=MetricsPair(me=46, partner=52),
+            balance_index=57,
+        )
+        if req.options.wantMetrics
+        else None
+    )
+
+    liking = mock_liking(req, metrics_obj)
+    timeline = mock_timeline(req)
 
     return AnalyzeResponse(
         summary_1line="전반적으로 대화는 안정적이지만, 특정 구간에서 오해 소지가 있는 표현이 관측됨.",
@@ -114,18 +350,110 @@ def mock_analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             if req.options.wantHighlights
             else []
         ),
-        metrics=(
-            Metrics(
-                initiative=MetricsPair(me=initiative_me, partner=initiative_pa),
-                responsiveness=MetricsPair(me=55, partner=61),
-                warmth=MetricsPair(me=58, partner=64),
-                repair=MetricsPair(me=46, partner=52),
-                balance_index=57,
-            )
-            if req.options.wantMetrics
-            else None
-        ),
+        metrics=metrics_obj,
+        liking_index=liking,
+        timeline_points=timeline,
     )
+
+
+def enforce_timeline_size(points: list) -> list:
+    if not isinstance(points, list):
+        return []
+    if len(points) > MAX_TIMELINE_POINTS:
+        return points[:MAX_TIMELINE_POINTS]
+    return points
+
+
+def openai_analyze(req: AnalyzeRequest) -> AnalyzeResponse:
+    if not openai_client or not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set on server")
+
+    transcript = build_transcript(req)
+    want_metrics = req.options.wantMetrics
+    want_highlights = req.options.wantHighlights
+
+    system = (
+        "You are a relationship conversation analyst.\n"
+        "Return ONLY valid JSON that matches the provided schema.\n"
+        "Do not include extra keys.\n"
+        "Use message_id values that exist in the transcript.\n"
+        "If language is ko, all strings must be in Korean.\n"
+        "If uncertain, lower confidence.\n"
+    )
+
+    user = f"""
+Language: {req.options.language}
+
+Constraints:
+- wantMetrics={str(want_metrics).lower()}
+- wantHighlights={str(want_highlights).lower()}
+
+Output requirements:
+1) summary_1line: 한 줄 인사이트(간결).
+2) confidence: low/medium/high (전체 분석 신뢰도).
+3) metrics:
+   - wantMetrics=false 이면 metrics=null
+   - wantMetrics=true 이면 각 항목 0~100 정수로 채움
+4) highlights:
+   - wantHighlights=false 이면 []
+   - wantHighlights=true 이면 3~8개, message_id는 transcript에 있는 값만 사용
+5) liking_index:
+   - score: 0~100 정수
+   - 기준: 50=비슷함, score>50이면 "내가 더 좋아하는 쪽", score<50이면 "상대가 더 좋아하는 쪽"
+   - winner: me/partner/tie (tie는 score가 46~54 사이면 사용)
+   - rationale_1line: 점수 판단 근거를 1줄로(구체적인 패턴 언급: 공감, 질문, 애정표현, 주도권, 회복 시도 등)
+   - confidence: low/medium/high
+   - 절대 단정적으로 "사랑한다/안한다" 같은 표현은 피하고, 대화 패턴 기반으로만 설명
+   - 표본이 적거나 감정 신호가 약하면 confidence를 낮춰라
+6) timeline_points:
+   - 목적: 대화 흐름을 시각화하기 위한 타임라인.
+   - 길이: 60~200개 사이.
+   - 선택 방식: 전체 메시지에서 균등 샘플링 + 갈등/회복 구간은 조금 더 포함.
+   - 각 포인트는 transcript의 message_id를 사용.
+   - i는 0부터 시작하는 순서 인덱스(시간 대신).
+   - mood/tension/repair는 0~100 정수.
+   - mood는 따뜻함/긍정(높을수록 좋음), tension은 갈등/방어(높을수록 나쁨), repair는 사과/공감/정리 같은 회복 시도(높을수록 좋음).
+
+Conversation (each line includes message_id):
+{transcript}
+""".strip()
+
+    try:
+        r = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "couple_chat_analysis",
+                    "schema": ANALYZE_SCHEMA,
+                    "strict": True,
+                }
+            },
+            store=False,
+        )
+
+        out = r.output_text
+        data = json.loads(out)
+
+        # 옵션 강제 정합성
+        if not want_metrics:
+            data["metrics"] = None
+        if not want_highlights:
+            data["highlights"] = []
+
+        # 타임라인 폭주 방지
+        data["timeline_points"] = enforce_timeline_size(data.get("timeline_points", []))
+
+        return AnalyzeResponse(**data)
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="OpenAI returned non-JSON output")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {str(e)}")
 
 
 # ---- Auth dependency: verify Firebase ID token ----
@@ -173,20 +501,18 @@ def health():
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest, uid: str = Depends(get_current_uid)):
-    # 1) 분석
+    # 최근 1000개만 분석(대화가 길면 비용/토큰 보호)
+    if len(req.messages) > MAX_MESSAGES:
+        req.messages = req.messages[-MAX_MESSAGES:]
+
     if ANALYSIS_MODE == "mock":
         resp = mock_analyze(req)
     elif ANALYSIS_MODE == "openai":
-        # TODO: 여기서 OpenAI 분석으로 교체
-        resp = mock_analyze(req)
+        resp = openai_analyze(req)
     else:
         raise HTTPException(
             status_code=500, detail=f"Unknown ANALYSIS_MODE: {ANALYSIS_MODE}"
         )
 
-    # 2) Firestore 저장 (원문은 저장 안 함)
-    analysis_id = save_analysis(uid, req, resp)
-
-    # 필요하면 resp에 analysis_id를 포함시키도록 스키마 확장 가능
-    # 지금은 UI가 그대로 동작하게 응답은 resp 그대로 반환
+    _analysis_id = save_analysis(uid, req, resp)
     return resp
