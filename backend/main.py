@@ -677,3 +677,304 @@ async def delete_character(character_id: str, uid: str = Depends(get_current_uid
 
     doc_ref.delete()
     return {"ok": True}
+
+
+# ---- Character-based Analysis ----
+class CharacterAnalyzeRequest(BaseModel):
+    character_id: str = Field(min_length=1)
+    new_messages: List[Message] = Field(min_length=1)
+    options: AnalyzeOptions = AnalyzeOptions()
+
+
+class PersonalityInsight(BaseModel):
+    """캐릭터의 기존 대화 패턴에서 추출된 인격/성향"""
+
+    communication_style: str  # 대화 스타일
+    emotional_patterns: str  # 감정 패턴
+    response_tendencies: str  # 반응 경향
+    key_phrases: List[str]  # 특징적인 표현들
+    overall_personality: str  # 종합적인 인격 요약
+
+
+class PsychologyAnalysis(BaseModel):
+    """새 채팅에 대한 심리 분석 (캐릭터 인격 기반)"""
+
+    underlying_emotions: str  # 숨겨진 감정
+    motivation: str  # 동기
+    communication_intent: str  # 의사소통 의도
+    personality_consistency: str  # 기존 인격과의 일관성
+    psychological_state: str  # 심리 상태
+    recommendations: List[str]  # 대응 추천사항
+
+
+class CharacterAnalyzeResponse(BaseModel):
+    """캐릭터 기반 분석 응답"""
+
+    character_name: str
+    personality_insight: PersonalityInsight
+    new_chat_psychology: PsychologyAnalysis
+    standard_analysis: AnalyzeResponse  # 기존 분석 결과도 포함
+
+
+def extract_personality_with_gpt(messages: List[Message]) -> PersonalityInsight:
+    """GPT를 사용하여 기존 대화에서 인격/패턴 추출"""
+    if not openai_client or not OPENAI_API_KEY:
+        # Fallback to mock
+        return PersonalityInsight(
+            communication_style="직설적이고 간결한 대화 스타일",
+            emotional_patterns="감정 표현이 절제된 편이며, 필요할 때만 공감 표현",
+            response_tendencies="빠른 반응, 짧은 문장 선호",
+            key_phrases=["응", "그래", "알겠어"],
+            overall_personality="실용적이고 과묵한 성향, 필요한 것만 말하는 타입",
+        )
+
+    transcript = "\n".join(
+        [
+            f"{'ME' if m.speaker == 'me' else 'PARTNER'}({m.id}): {m.text.strip()}"
+            for m in messages
+        ]
+    )
+
+    system = """You are a personality and communication pattern analyst.
+Analyze the conversation history and extract personality insights.
+Return ONLY valid JSON matching the schema."""
+
+    user = f"""Analyze this person's communication patterns and personality from their conversation history:
+
+{transcript}
+
+Extract:
+1. communication_style: How they communicate (tone, length, directness)
+2. emotional_patterns: Their emotional expression patterns
+3. response_tendencies: How they typically respond
+4. key_phrases: 5-10 characteristic phrases they use (in Korean)
+5. overall_personality: Overall personality summary (2-3 sentences)
+
+Return in Korean."""
+
+    schema = {
+        "type": "object",
+        "required": [
+            "communication_style",
+            "emotional_patterns",
+            "response_tendencies",
+            "key_phrases",
+            "overall_personality",
+        ],
+        "properties": {
+            "communication_style": {"type": "string"},
+            "emotional_patterns": {"type": "string"},
+            "response_tendencies": {"type": "string"},
+            "key_phrases": {"type": "array", "items": {"type": "string"}},
+            "overall_personality": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+
+    try:
+        r = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "personality_insight",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+            store=False,
+        )
+        data = json.loads(r.output_text)
+        return PersonalityInsight(**data)
+    except Exception as e:
+        print(f"Error extracting personality: {e}")
+        # Fallback
+        return PersonalityInsight(
+            communication_style="분석 중 오류 발생",
+            emotional_patterns="분석 불가",
+            response_tendencies="분석 불가",
+            key_phrases=[],
+            overall_personality="인격 분석을 완료할 수 없습니다.",
+        )
+
+
+def analyze_new_chat_psychology(
+    personality: PersonalityInsight,
+    character_messages: List[Message],
+    new_messages: List[Message],
+) -> PsychologyAnalysis:
+    """새로운 채팅의 심리를 기존 인격을 바탕으로 분석"""
+    if not openai_client or not OPENAI_API_KEY:
+        # Fallback
+        return PsychologyAnalysis(
+            underlying_emotions="분석 불가 (OpenAI API 키 없음)",
+            motivation="분석 불가",
+            communication_intent="분석 불가",
+            personality_consistency="분석 불가",
+            psychological_state="분석 불가",
+            recommendations=["OpenAI API를 설정하세요"],
+        )
+
+    old_transcript = "\n".join(
+        [
+            f"{'ME' if m.speaker == 'me' else 'PARTNER'}: {m.text.strip()}"
+            for m in character_messages[-50:]  # 최근 50개만
+        ]
+    )
+
+    new_transcript = "\n".join(
+        [
+            f"{'ME' if m.speaker == 'me' else 'PARTNER'}: {m.text.strip()}"
+            for m in new_messages
+        ]
+    )
+
+    system = """You are a psychological analyst specializing in communication patterns.
+Given a person's established personality and new messages, analyze the deeper psychology.
+Return ONLY valid JSON matching the schema."""
+
+    user = f"""Based on this person's established personality:
+
+Communication Style: {personality.communication_style}
+Emotional Patterns: {personality.emotional_patterns}
+Response Tendencies: {personality.response_tendencies}
+Key Phrases: {', '.join(personality.key_phrases)}
+Overall Personality: {personality.overall_personality}
+
+Previous conversation context (recent):
+{old_transcript}
+
+NEW MESSAGES to analyze:
+{new_transcript}
+
+Analyze the psychology behind the NEW MESSAGES considering their established personality:
+
+1. underlying_emotions: What emotions are really underneath? (considering their personality)
+2. motivation: What motivates these messages? What do they want?
+3. communication_intent: What are they trying to communicate? (explicit + implicit)
+4. personality_consistency: How consistent are these new messages with their usual personality? Any changes?
+5. psychological_state: Current psychological/emotional state
+6. recommendations: 3-5 practical recommendations for how to respond effectively
+
+Answer in Korean. Be insightful and specific."""
+
+    schema = {
+        "type": "object",
+        "required": [
+            "underlying_emotions",
+            "motivation",
+            "communication_intent",
+            "personality_consistency",
+            "psychological_state",
+            "recommendations",
+        ],
+        "properties": {
+            "underlying_emotions": {"type": "string"},
+            "motivation": {"type": "string"},
+            "communication_intent": {"type": "string"},
+            "personality_consistency": {"type": "string"},
+            "psychological_state": {"type": "string"},
+            "recommendations": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    }
+
+    try:
+        r = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "psychology_analysis",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+            store=False,
+        )
+        data = json.loads(r.output_text)
+        return PsychologyAnalysis(**data)
+    except Exception as e:
+        print(f"Error analyzing psychology: {e}")
+        return PsychologyAnalysis(
+            underlying_emotions="분석 중 오류 발생",
+            motivation="분석 불가",
+            communication_intent="분석 불가",
+            personality_consistency="분석 불가",
+            psychological_state="분석 불가",
+            recommendations=["오류가 발생했습니다"],
+        )
+
+
+@app.post(
+    "/api/characters/{character_id}/analyze", response_model=CharacterAnalyzeResponse
+)
+async def analyze_with_character(
+    character_id: str, req: AnalyzeRequest, uid: str = Depends(get_current_uid)
+):
+    """
+    캐릭터를 기반으로 새로운 채팅 분석
+    1. 캐릭터의 기존 대화에서 인격/패턴 추출
+    2. 새 채팅의 심리를 그 인격 기반으로 분석
+    3. 일반 분석도 함께 제공
+    """
+    if db is None:
+        raise HTTPException(status_code=500, detail="Firestore not configured")
+
+    # 1. 캐릭터 로드
+    doc_ref = db.collection("characters").document(character_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    data = doc.to_dict()
+    if data.get("uid") != uid:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    character_messages = [Message(**m) for m in data.get("messages", [])]
+    character_name = data.get("name", "Unknown")
+
+    if len(character_messages) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Character needs at least 2 messages to extract personality",
+        )
+
+    # 2. 인격 추출 (기존 대화 기반)
+    print(f"Extracting personality from {len(character_messages)} messages...")
+    personality_insight = extract_personality_with_gpt(character_messages)
+
+    # 3. 새 채팅 심리 분석 (인격 기반)
+    print(f"Analyzing psychology of {len(req.messages)} new messages...")
+    psychology_analysis = analyze_new_chat_psychology(
+        personality_insight, character_messages, req.messages
+    )
+
+    # 4. 일반 분석도 수행
+    if len(req.messages) > MAX_MESSAGES:
+        req.messages = req.messages[-MAX_MESSAGES:]
+
+    if ANALYSIS_MODE == "mock":
+        standard_analysis = mock_analyze(req)
+    elif ANALYSIS_MODE == "openai":
+        standard_analysis = openai_analyze(req)
+    else:
+        raise HTTPException(
+            status_code=500, detail=f"Unknown ANALYSIS_MODE: {ANALYSIS_MODE}"
+        )
+
+    return CharacterAnalyzeResponse(
+        character_name=character_name,
+        personality_insight=personality_insight,
+        new_chat_psychology=psychology_analysis,
+        standard_analysis=standard_analysis,
+    )

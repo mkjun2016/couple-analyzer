@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect } from "react";
 import Papa from "papaparse";
 import { logout } from "../utils/authService";
 import { useAuth } from "../AuthProvider";
-import { postAnalyze, saveCharacter, getCharacters, getCharacter, deleteCharacter } from "../utils/api";
+import { postAnalyze, saveCharacter, getCharacters, getCharacter, deleteCharacter, analyzeWithCharacter } from "../utils/api";
 import {
   ResponsiveContainer,
   LineChart,
@@ -255,6 +255,11 @@ Partner: 응응`
   const [savingCharacter, setSavingCharacter] = useState(false);
   const [loadingCharacters, setLoadingCharacters] = useState(false);
 
+  // 캐릭터 기반 분석
+  const [characterAnalysisResult, setCharacterAnalysisResult] = useState(null);
+  const [showCharacterAnalysisModal, setShowCharacterAnalysisModal] = useState(false);
+  const [selectedCharacter, setSelectedCharacter] = useState(null); // 현재 선택된 캐릭터
+
   const availableEmojis = ["👨", "👩", "🧑", "👦", "👧", "👴", "👵", "🧔", "👱", "👨‍🦰", "👩‍🦰", "🧑‍🦱", "👨‍🦱", "👩‍🦱", "🤵"];
 
   // 캐릭터 목록 불러오기
@@ -317,6 +322,7 @@ Partner: 응응`
       setError("");
       setMeName("");
       setPartnerName("");
+      setSelectedCharacter(character); // 선택된 캐릭터 저장
     } catch (err) {
       setError(err?.message || "캐릭터 로드 실패");
     } finally {
@@ -434,6 +440,7 @@ Partner: 응응`
 
     setLoading(true);
     setResult(null);
+    setCharacterAnalysisResult(null);
 
     try {
       if (useMock) {
@@ -450,6 +457,53 @@ Partner: 응응`
       setResult(data);
     } catch (err) {
       setError(err?.message || "분석 요청 실패");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onAnalyzeWithCharacter(characterId) {
+    setError("");
+
+    const parsed = parseChatAny(raw);
+
+    let msgs = parsed;
+    try {
+      msgs = applySpeakerMapping(parsed);
+    } catch (e) {
+      setError(e?.message || "Me/Partner 매핑이 필요해.");
+      return;
+    }
+
+    setMessages(msgs);
+
+    if (msgs.length < 1) {
+      setError("분석할 새 메시지가 없어.");
+      return;
+    }
+
+    setLoading(true);
+    setResult(null);
+    setCharacterAnalysisResult(null);
+    setShowCharacterListModal(false);
+
+    try {
+      if (useMock) {
+        setError("캐릭터 기반 분석은 Mock 모드에서 지원하지 않아. API 모드로 전환해줘.");
+        setLoading(false);
+        return;
+      }
+
+      const data = await analyzeWithCharacter(characterId, {
+        messages: msgs,
+        options: { language: "ko", wantHighlights: true, wantMetrics: true },
+      });
+
+      setCharacterAnalysisResult(data);
+      setResult(data.standard_analysis);
+      setShowCharacterAnalysisModal(true);
+    } catch (err) {
+      setError(err?.message || "캐릭터 기반 분석 실패");
     } finally {
       setLoading(false);
     }
@@ -534,6 +588,43 @@ Partner: 응응`
           <div className="card">
             <h3>Input</h3>
 
+            {/* 선택된 캐릭터 표시 */}
+            {selectedCharacter && (
+              <div style={{
+                background: "rgba(56, 189, 248, 0.1)",
+                border: "1px solid rgba(56, 189, 248, 0.3)",
+                borderRadius: 8,
+                padding: 10,
+                marginBottom: 12,
+              }}>
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <span style={{ fontSize: 24 }}>{selectedCharacter.emoji || "👤"}</span>
+                    <div>
+                      <div style={{ color: "#38bdf8", fontWeight: 700, fontSize: 13 }}>
+                        📋 선택된 캐릭터
+                      </div>
+                      <div style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 600 }}>
+                        {selectedCharacter.name}
+                      </div>
+                    </div>
+                  </div>
+                  <button 
+                    className="btn" 
+                    onClick={() => setSelectedCharacter(null)}
+                    style={{ 
+                      fontSize: 11, 
+                      padding: "4px 8px",
+                      background: "rgba(239, 68, 68, 0.1)",
+                      color: "#f87171"
+                    }}
+                  >
+                    ✕ 해제
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
               <div className="row">
                 <label className="btn" style={{ padding: 0 }}>
@@ -556,6 +647,7 @@ Partner: 응응`
                     setError("");
                     setMeName("");
                     setPartnerName("");
+                    setSelectedCharacter(null);
                   }}
                 >
                   Clear
@@ -982,6 +1074,10 @@ timestamp,"name","message"`}
               </button>
             </div>
 
+            <p className="hint" style={{ marginBottom: 16 }}>
+              💡 <strong>Load</strong>: 캐릭터 대화를 불러오기 | <strong>🧠 Analyze</strong>: 캐릭터 인격을 바탕으로 현재 채팅의 심리 분석
+            </p>
+
             {loadingCharacters ? (
               <p className="hint">Loading characters...</p>
             ) : characters.length > 0 ? (
@@ -1049,6 +1145,23 @@ timestamp,"name","message"`}
                         className="btn" 
                         onClick={(e) => {
                           e.stopPropagation();
+                          onAnalyzeWithCharacter(char.id);
+                        }}
+                        style={{ 
+                          flex: 1,
+                          fontSize: 11, 
+                          padding: "6px 8px",
+                          background: "rgba(34, 197, 94, 0.1)", 
+                          color: "#4ade80" 
+                        }}
+                        title="이 캐릭터의 인격을 바탕으로 현재 채팅 분석"
+                      >
+                        🧠 Analyze
+                      </button>
+                      <button 
+                        className="btn" 
+                        onClick={(e) => {
+                          e.stopPropagation();
                           onDeleteCharacter(char.id);
                         }}
                         style={{ 
@@ -1067,6 +1180,244 @@ timestamp,"name","message"`}
             ) : (
               <p className="hint">저장된 캐릭터가 없습니다.</p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* 캐릭터 심리 분석 결과 모달 */}
+      {showCharacterAnalysisModal && characterAnalysisResult && (
+        <div 
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.85)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1001,
+            padding: 20,
+          }}
+          onClick={() => setShowCharacterAnalysisModal(false)}
+        >
+          <div 
+            className="card" 
+            style={{ 
+              width: "100%", 
+              maxWidth: 900,
+              maxHeight: "85vh",
+              overflow: "auto",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>🧠 심리 분석: {characterAnalysisResult.character_name}</h3>
+              <button 
+                className="btn"
+                onClick={() => setShowCharacterAnalysisModal(false)}
+                style={{ fontSize: 20, padding: "4px 12px" }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* 인격 분석 */}
+            <div style={{ marginBottom: 24 }}>
+              <h3 style={{ 
+                color: "#38bdf8", 
+                fontSize: 16, 
+                marginBottom: 12,
+                borderBottom: "2px solid rgba(56, 189, 248, 0.3)",
+                paddingBottom: 8,
+              }}>
+                👤 캐릭터 인격 분석 (기존 대화 기반)
+              </h3>
+              
+              <div style={{ 
+                background: "rgba(56, 189, 248, 0.05)",
+                border: "1px solid rgba(56, 189, 248, 0.2)",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 12,
+              }}>
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#38bdf8" }}>
+                    💬 대화 스타일
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.personality_insight.communication_style}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#38bdf8" }}>
+                    ❤️ 감정 패턴
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.personality_insight.emotional_patterns}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#38bdf8" }}>
+                    🔄 반응 경향
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.personality_insight.response_tendencies}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#38bdf8" }}>
+                    📝 특징적 표현들
+                  </div>
+                  <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                    {characterAnalysisResult.personality_insight.key_phrases.map((phrase, idx) => (
+                      <span key={idx} className="pill" style={{ 
+                        background: "rgba(56, 189, 248, 0.15)",
+                        color: "#38bdf8",
+                        border: "1px solid rgba(56, 189, 248, 0.3)"
+                      }}>
+                        "{phrase}"
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#38bdf8" }}>
+                    🎭 종합 인격
+                  </div>
+                  <div style={{ 
+                    color: "#e2e8f0", 
+                    fontSize: 14, 
+                    lineHeight: 1.6,
+                    background: "rgba(15, 23, 42, 0.4)",
+                    padding: 12,
+                    borderRadius: 8,
+                    fontStyle: "italic",
+                  }}>
+                    {characterAnalysisResult.personality_insight.overall_personality}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 새 채팅 심리 분석 */}
+            <div>
+              <h3 style={{ 
+                color: "#4ade80", 
+                fontSize: 16, 
+                marginBottom: 12,
+                borderBottom: "2px solid rgba(74, 222, 128, 0.3)",
+                paddingBottom: 8,
+              }}>
+                🔍 새 채팅 심리 분석 (인격 기반)
+              </h3>
+              
+              <div style={{ 
+                background: "rgba(34, 197, 94, 0.05)",
+                border: "1px solid rgba(74, 222, 128, 0.2)",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 12,
+              }}>
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#4ade80" }}>
+                    💭 숨겨진 감정
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.new_chat_psychology.underlying_emotions}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#4ade80" }}>
+                    🎯 동기
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.new_chat_psychology.motivation}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#4ade80" }}>
+                    💬 의사소통 의도
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.new_chat_psychology.communication_intent}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#4ade80" }}>
+                    🔄 인격 일관성
+                  </div>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, lineHeight: 1.6 }}>
+                    {characterAnalysisResult.new_chat_psychology.personality_consistency}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#4ade80" }}>
+                    🧠 심리 상태
+                  </div>
+                  <div style={{ 
+                    color: "#e2e8f0", 
+                    fontSize: 14, 
+                    lineHeight: 1.6,
+                    background: "rgba(15, 23, 42, 0.4)",
+                    padding: 12,
+                    borderRadius: 8,
+                  }}>
+                    {characterAnalysisResult.new_chat_psychology.psychological_state}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="hint" style={{ marginBottom: 4, fontWeight: 700, color: "#4ade80" }}>
+                    💡 대응 추천
+                  </div>
+                  <div style={{ 
+                    background: "rgba(15, 23, 42, 0.4)",
+                    padding: 12,
+                    borderRadius: 8,
+                  }}>
+                    {characterAnalysisResult.new_chat_psychology.recommendations.map((rec, idx) => (
+                      <div key={idx} style={{ 
+                        color: "#e2e8f0", 
+                        fontSize: 13, 
+                        lineHeight: 1.6,
+                        marginBottom: idx < characterAnalysisResult.new_chat_psychology.recommendations.length - 1 ? 8 : 0,
+                        paddingLeft: 16,
+                        position: "relative",
+                      }}>
+                        <span style={{ 
+                          position: "absolute", 
+                          left: 0, 
+                          color: "#4ade80",
+                          fontWeight: 700,
+                        }}>
+                          {idx + 1}.
+                        </span>
+                        {rec}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+              <button 
+                className="btn primary" 
+                onClick={() => setShowCharacterAnalysisModal(false)}
+              >
+                확인
+              </button>
+            </div>
           </div>
         </div>
       )}
