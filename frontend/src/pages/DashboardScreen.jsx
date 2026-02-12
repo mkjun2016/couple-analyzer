@@ -1,8 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import Papa from "papaparse";
 import { logout } from "../utils/authService";
 import { useAuth } from "../AuthProvider";
-import { postAnalyze } from "../utils/api";
+import { postAnalyze, saveCharacter, getCharacters, getCharacter, deleteCharacter } from "../utils/api";
 import {
   ResponsiveContainer,
   LineChart,
@@ -246,6 +246,95 @@ Partner: 응응`
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
 
+  // 캐릭터 관리
+  const [characters, setCharacters] = useState([]);
+  const [showCharacterModal, setShowCharacterModal] = useState(false);
+  const [showCharacterListModal, setShowCharacterListModal] = useState(false);
+  const [characterName, setCharacterName] = useState("");
+  const [selectedEmoji, setSelectedEmoji] = useState("👤");
+  const [savingCharacter, setSavingCharacter] = useState(false);
+  const [loadingCharacters, setLoadingCharacters] = useState(false);
+
+  const availableEmojis = ["👨", "👩", "🧑", "👦", "👧", "👴", "👵", "🧔", "👱", "👨‍🦰", "👩‍🦰", "🧑‍🦱", "👨‍🦱", "👩‍🦱", "🤵"];
+
+  // 캐릭터 목록 불러오기
+  useEffect(() => {
+    loadCharacters();
+  }, []);
+
+  async function loadCharacters() {
+    try {
+      setLoadingCharacters(true);
+      const data = await getCharacters();
+      setCharacters(data);
+    } catch (err) {
+      console.error("Failed to load characters:", err);
+    } finally {
+      setLoadingCharacters(false);
+    }
+  }
+
+  async function onSaveCharacter() {
+    if (!characterName.trim()) {
+      setError("캐릭터 이름을 입력해주세요.");
+      return;
+    }
+    
+    if (messages.length < 2) {
+      setError("저장할 메시지가 너무 적어요. Parse 후 다시 시도해주세요.");
+      return;
+    }
+
+    try {
+      setSavingCharacter(true);
+      await saveCharacter(characterName, messages, selectedEmoji);
+      setShowCharacterModal(false);
+      setCharacterName("");
+      setSelectedEmoji("👤");
+      await loadCharacters();
+      setError("");
+    } catch (err) {
+      setError(err?.message || "캐릭터 저장 실패");
+    } finally {
+      setSavingCharacter(false);
+    }
+  }
+
+  async function onLoadCharacter(characterId) {
+    try {
+      setLoading(true);
+      setShowCharacterListModal(false);
+      const character = await getCharacter(characterId);
+      
+      // 메시지를 텍스트로 변환
+      const chatText = character.messages
+        .map((m) => `${m.speaker === "me" ? "Me" : "Partner"}: ${m.text}`)
+        .join("\n");
+      
+      setRaw(chatText);
+      setMessages(character.messages);
+      setResult(null);
+      setError("");
+      setMeName("");
+      setPartnerName("");
+    } catch (err) {
+      setError(err?.message || "캐릭터 로드 실패");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onDeleteCharacter(characterId) {
+    if (!confirm("정말 이 캐릭터를 삭제하시겠어요?")) return;
+    
+    try {
+      await deleteCharacter(characterId);
+      await loadCharacters();
+    } catch (err) {
+      setError(err?.message || "캐릭터 삭제 실패");
+    }
+  }
+
   const parsedPreview = useMemo(() => parseChatAny(raw), [raw]);
   const isCsvInput = useMemo(() => looksLikeCsv(raw), [raw]);
 
@@ -485,6 +574,34 @@ Partner: 응응`
               </div>
             </div>
 
+            {/* 저장된 캐릭터 목록 */}
+            <div className="hr" />
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <h3>Saved Characters ({characters.length})</h3>
+              <button 
+                className="btn primary" 
+                onClick={() => setShowCharacterListModal(true)}
+                style={{ fontSize: 12, padding: "6px 12px" }}
+              >
+                📋 Browse All
+              </button>
+            </div>
+            
+            {loadingCharacters ? (
+              <p className="hint" style={{ marginBottom: 12 }}>Loading...</p>
+            ) : characters.length > 0 ? (
+              <p className="hint" style={{ marginBottom: 12 }}>
+                {characters.slice(0, 3).map(c => c.emoji || "👤").join(" ")} 
+                {characters.length > 3 && ` +${characters.length - 3} more`}
+                {" · "}
+                Click "Browse All" to see your characters
+              </p>
+            ) : (
+              <p className="hint" style={{ marginBottom: 12 }}>
+                저장된 캐릭터가 없습니다. Parse 후 💾 Save Character 버튼을 눌러 저장하세요.
+              </p>
+            )}
+
             <textarea
               className="textarea"
               value={raw}
@@ -553,6 +670,15 @@ timestamp,"name","message"`}
               <button className="btn primary" onClick={onAnalyze} disabled={loading}>
                 {loading ? "Analyzing..." : "Analyze"}
               </button>
+              {messages.length >= 2 && (
+                <button 
+                  className="btn" 
+                  onClick={() => setShowCharacterModal(true)}
+                  style={{ marginLeft: "auto" }}
+                >
+                  💾 Save Character
+                </button>
+              )}
               <span className="hint">CSV면 매핑 → Analyze. (2인 대화 기준)</span>
             </div>
 
@@ -705,10 +831,245 @@ timestamp,"name","message"`}
           <h3>Next</h3>
           <p className="hint">
             지금 흐름: CSV 업로드 → speaker 매핑 → <span className="pill">POST /api/analyze</span> →
-            결과 렌더. 다음은 캐릭터 선택 + analyses 저장 + memory_summary 업데이트로 확장하면 된다.
+            결과 렌더. 캐릭터 저장 기능으로 저장된 대화 패턴을 재사용할 수 있습니다.
           </p>
         </div>
       </div>
+
+      {/* 캐릭터 저장 모달 */}
+      {showCharacterModal && (
+        <div 
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.7)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => setShowCharacterModal(false)}
+        >
+          <div 
+            className="card" 
+            style={{ 
+              width: "90%", 
+              maxWidth: 500,
+              margin: 20,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>Save Character</h3>
+            <p className="hint" style={{ marginBottom: 16 }}>
+              현재 파싱된 대화를 캐릭터로 저장하면 나중에 다시 불러올 수 있어요.
+            </p>
+
+            <div style={{ marginBottom: 16 }}>
+              <div className="hint" style={{ marginBottom: 6 }}>이모지 선택</div>
+              <div style={{ 
+                display: "grid", 
+                gridTemplateColumns: "repeat(5, 1fr)", 
+                gap: 8,
+                marginBottom: 16,
+              }}>
+                {availableEmojis.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => setSelectedEmoji(emoji)}
+                    style={{
+                      padding: 12,
+                      fontSize: 28,
+                      background: selectedEmoji === emoji 
+                        ? "rgba(56, 189, 248, 0.2)" 
+                        : "rgba(15, 23, 42, 0.4)",
+                      border: selectedEmoji === emoji 
+                        ? "2px solid rgba(56, 189, 248, 0.6)" 
+                        : "1px solid rgba(148, 163, 184, 0.18)",
+                      borderRadius: 12,
+                      cursor: "pointer",
+                      transition: "all 0.2s",
+                    }}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div className="hint" style={{ marginBottom: 6 }}>캐릭터 이름</div>
+              <input
+                className="input"
+                type="text"
+                value={characterName}
+                onChange={(e) => setCharacterName(e.target.value)}
+                placeholder="예: 우리 첫 대화"
+                style={{
+                  width: "100%",
+                  padding: 10,
+                  background: "rgba(15, 23, 42, 0.6)",
+                  border: "1px solid rgba(148, 163, 184, 0.18)",
+                  borderRadius: 8,
+                  color: "#e2e8f0",
+                  fontSize: 14,
+                }}
+              />
+            </div>
+
+            <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+              <button 
+                className="btn" 
+                onClick={() => {
+                  setShowCharacterModal(false);
+                  setCharacterName("");
+                  setSelectedEmoji("👤");
+                }}
+                disabled={savingCharacter}
+              >
+                Cancel
+              </button>
+              <button 
+                className="btn primary" 
+                onClick={onSaveCharacter}
+                disabled={savingCharacter || !characterName.trim()}
+              >
+                {savingCharacter ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 캐릭터 목록 모달 */}
+      {showCharacterListModal && (
+        <div 
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.8)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: 20,
+          }}
+          onClick={() => setShowCharacterListModal(false)}
+        >
+          <div 
+            className="card" 
+            style={{ 
+              width: "100%", 
+              maxWidth: 700,
+              maxHeight: "80vh",
+              overflow: "auto",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>📋 Saved Characters ({characters.length})</h3>
+              <button 
+                className="btn"
+                onClick={() => setShowCharacterListModal(false)}
+                style={{ fontSize: 20, padding: "4px 12px" }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {loadingCharacters ? (
+              <p className="hint">Loading characters...</p>
+            ) : characters.length > 0 ? (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                {characters.map((char) => (
+                  <div 
+                    key={char.id} 
+                    style={{
+                      background: "rgba(15, 23, 42, 0.6)",
+                      border: "1px solid rgba(148, 163, 184, 0.18)",
+                      borderRadius: 12,
+                      padding: 16,
+                      cursor: "pointer",
+                      transition: "all 0.2s",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "rgba(56, 189, 248, 0.1)";
+                      e.currentTarget.style.borderColor = "rgba(56, 189, 248, 0.4)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "rgba(15, 23, 42, 0.6)";
+                      e.currentTarget.style.borderColor = "rgba(148, 163, 184, 0.18)";
+                    }}
+                  >
+                    <div style={{ 
+                      fontSize: 48, 
+                      textAlign: "center", 
+                      marginBottom: 8,
+                    }}>
+                      {char.emoji || "👤"}
+                    </div>
+                    <div style={{ 
+                      color: "#e2e8f0", 
+                      fontWeight: 700, 
+                      fontSize: 14,
+                      marginBottom: 4,
+                      textAlign: "center",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}>
+                      {char.name}
+                    </div>
+                    <div style={{ 
+                      color: "#94a3b8", 
+                      fontSize: 12,
+                      textAlign: "center",
+                      marginBottom: 12,
+                    }}>
+                      {char.messageCount} messages
+                    </div>
+                    <div className="row" style={{ gap: 6 }}>
+                      <button 
+                        className="btn primary" 
+                        onClick={() => onLoadCharacter(char.id)}
+                        style={{ 
+                          flex: 1,
+                          fontSize: 11, 
+                          padding: "6px 8px",
+                        }}
+                      >
+                        Load
+                      </button>
+                      <button 
+                        className="btn" 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteCharacter(char.id);
+                        }}
+                        style={{ 
+                          fontSize: 11, 
+                          padding: "6px 8px", 
+                          background: "rgba(239, 68, 68, 0.1)", 
+                          color: "#f87171" 
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">저장된 캐릭터가 없습니다.</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

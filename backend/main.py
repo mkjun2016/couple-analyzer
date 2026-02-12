@@ -516,3 +516,164 @@ async def analyze(req: AnalyzeRequest, uid: str = Depends(get_current_uid)):
 
     _analysis_id = save_analysis(uid, req, resp)
     return resp
+
+
+# ---- Character APIs ----
+class SaveCharacterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    messages: List[Message] = Field(min_length=2)
+    emoji: Optional[str] = "👤"
+
+
+class CharacterSummary(BaseModel):
+    id: str
+    name: str
+    messageCount: int
+    createdAt: str
+    emoji: str = "👤"
+
+
+class CharacterDetail(BaseModel):
+    id: str
+    name: str
+    messages: List[Message]
+    createdAt: str
+    emoji: str = "👤"
+
+
+@app.post("/api/characters")
+async def save_character(
+    req: SaveCharacterRequest, uid: str = Depends(get_current_uid)
+):
+    """캐릭터(대화 템플릿) 저장"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Firestore not configured")
+
+    doc = {
+        "uid": uid,
+        "name": req.name,
+        "messages": [m.model_dump() for m in req.messages],
+        "messageCount": len(req.messages),
+        "emoji": req.emoji or "👤",
+        "createdAt": datetime.now(timezone.utc),
+    }
+
+    ref = db.collection("characters").document()
+    ref.set(doc)
+
+    return {
+        "id": ref.id,
+        "name": req.name,
+        "messageCount": len(req.messages),
+        "emoji": req.emoji,
+    }
+
+
+@app.get("/api/characters", response_model=List[CharacterSummary])
+async def list_characters(uid: str = Depends(get_current_uid)):
+    """사용자의 저장된 캐릭터 목록 조회"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Firestore not configured")
+
+    try:
+        # order_by 없이 조회 (복합 인덱스 불필요)
+        docs = db.collection("characters").where("uid", "==", uid).limit(50).stream()
+
+        results = []
+        for doc in docs:
+            data = doc.to_dict()
+            created_at = data.get("createdAt")
+
+            # datetime 객체를 문자열로 변환
+            if created_at:
+                if hasattr(created_at, "isoformat"):
+                    created_at_str = created_at.isoformat()
+                else:
+                    created_at_str = str(created_at)
+            else:
+                created_at_str = datetime.now(timezone.utc).isoformat()
+
+            results.append(
+                CharacterSummary(
+                    id=doc.id,
+                    name=data.get("name", "Untitled"),
+                    messageCount=data.get("messageCount", 0),
+                    emoji=data.get("emoji", "👤"),
+                    createdAt=created_at_str,
+                )
+            )
+
+        # 클라이언트 측에서 정렬 (최신순)
+        results.sort(key=lambda x: x.createdAt, reverse=True)
+        return results
+    except Exception as e:
+        # 디버깅을 위한 에러 로그
+        print(f"Error loading characters: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to load characters: {str(e)}"
+        )
+
+
+@app.get("/api/characters/{character_id}", response_model=CharacterDetail)
+async def get_character(character_id: str, uid: str = Depends(get_current_uid)):
+    """특정 캐릭터 상세 조회"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Firestore not configured")
+
+    try:
+        doc_ref = db.collection("characters").document(character_id)
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Character not found")
+
+        data = doc.to_dict()
+        if data.get("uid") != uid:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        messages = [Message(**m) for m in data.get("messages", [])]
+
+        # datetime 처리
+        created_at = data.get("createdAt")
+        if created_at:
+            if hasattr(created_at, "isoformat"):
+                created_at_str = created_at.isoformat()
+            else:
+                created_at_str = str(created_at)
+        else:
+            created_at_str = datetime.now(timezone.utc).isoformat()
+
+        return CharacterDetail(
+            id=doc.id,
+            name=data.get("name", "Untitled"),
+            messages=messages,
+            emoji=data.get("emoji", "👤"),
+            createdAt=created_at_str,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error loading character {character_id}: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to load character: {str(e)}"
+        )
+
+
+@app.delete("/api/characters/{character_id}")
+async def delete_character(character_id: str, uid: str = Depends(get_current_uid)):
+    """캐릭터 삭제"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Firestore not configured")
+
+    doc_ref = db.collection("characters").document(character_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    data = doc.to_dict()
+    if data.get("uid") != uid:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc_ref.delete()
+    return {"ok": True}
